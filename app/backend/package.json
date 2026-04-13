@@ -1,0 +1,19 @@
+{
+  "name": "@app/backend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "start": "bun run src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@app/shared": "workspace:*",
+    "@elysiajs/cors": "latest",
+    "bullmq": "^5.73.5",
+    "elysia": "latest"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2"
+  }
+}

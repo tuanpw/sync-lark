@@ -1,0 +1,11 @@
+node_modules/
+.next/
+dist/
+.env
+.env.*
+coverage/
+*.log
+data/
+
+.chrome-profile/
+cookies.json

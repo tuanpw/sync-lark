@@ -1,0 +1,14 @@
+{
+  "name": "@app/shared",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./api-contracts": "./src/api-contracts.ts",
+    "./mock-data": "./src/mock-data.ts",
+    "./transfer-summary": "./src/transfer-summary.ts",
+    "./types": "./src/types.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2"
+  }
+}

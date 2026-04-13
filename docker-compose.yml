@@ -1,0 +1,95 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lark-transfer-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-lark_transfer}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: lark-transfer-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+
+  minio:
+    image: minio/minio:RELEASE.2025-02-03T21-03-04Z
+    container_name: lark-transfer-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+
+  backend:
+    build:
+      context: .
+      dockerfile: app/backend/Dockerfile
+    container_name: lark-transfer-backend
+    restart: unless-stopped
+    environment:
+      BACKEND_PORT: 3001
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      LARK_APP_ID: ${LARK_APP_ID}
+      LARK_APP_SECRET: ${LARK_APP_SECRET}
+    ports:
+      - "${BACKEND_PORT:-3001}:3001"
+    volumes:
+      - backend_data:/app/data
+    depends_on:
+      - redis
+
+  worker:
+    build:
+      context: .
+      dockerfile: app/worker/Dockerfile
+    container_name: lark-transfer-worker
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://backend:3001/api
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      LARK_APP_ID: ${LARK_APP_ID}
+      LARK_APP_SECRET: ${LARK_APP_SECRET}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-lark-import}
+    depends_on:
+      - backend
+      - redis
+      - minio
+
+  frontend:
+    build:
+      context: .
+      dockerfile: app/frontend/Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: http://${SERVER_IP:-37.27.131.100}:3001/api
+    container_name: lark-transfer-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  backend_data:

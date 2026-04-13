@@ -1,0 +1,22 @@
+{
+  "name": "lark-minio-transfer-plan",
+  "private": true,
+  "workspaces": [
+    "app/*"
+  ],
+  "scripts": {
+    "install:all": "bun install",
+    "dev:backend": "bun run --cwd app/backend dev",
+    "dev:frontend": "bun run --cwd app/frontend dev",
+    "dev:worker": "bun run --cwd app/worker dev",
+    "dev": "echo \"Run backend, frontend, and worker in separate terminals\"",
+    "typecheck": "bun run --cwd app/backend typecheck && bun run --cwd app/frontend typecheck && bun run --cwd app/worker typecheck",
+    "lint": "echo \"Lint setup pending\""
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1019.0",
+    "@aws-sdk/lib-storage": "^3.1019.0",
+    "playwright": "^1.58.2",
+    "xlsx": "^0.18.5"
+  }
+}
