@@ -43,8 +43,9 @@ export const workerRoutes = new Elysia()
       status: TransferJobStatus;
       bytesTransferred: number;
       lastError?: string;
+      fileSize?: number;
     };
-    return store.updateJobProgress(params.id, payload.workerId, payload.status, payload.bytesTransferred, payload.lastError);
+    return store.updateJobProgress(params.id, payload.workerId, payload.status, payload.bytesTransferred, payload.lastError, payload.fileSize);
   })
 
   // ─── Session updates from worker ───

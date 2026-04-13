@@ -1,6 +1,6 @@
 import { Worker as BullWorker } from 'bullmq';
 import { S3Client, ListObjectsV2Command } from '@aws-sdk/client-s3';
-import { listLarkFolderFiles, downloadLarkFile, type LarkFileEntry } from './lark-api';
+import { listLarkFolderFiles, downloadLarkFileStream, type LarkFileEntry } from './lark-api';
 import { ensureBucket, uploadStream } from './minio-client';
 
 const BACKEND_URL = process.env.BACKEND_URL ?? 'http://localhost:3001/api';
@@ -45,8 +45,13 @@ async function patch(path: string, body: unknown): Promise<void> {
   });
 }
 
-async function updateJob(jobId: string, status: string, bytesTransferred: number, lastError?: string) {
-  await patch(`/worker/jobs/${jobId}`, { workerId: WORKER_ID, status, bytesTransferred, lastError });
+async function updateJob(jobId: string, status: string, bytesTransferred: number, extra?: { lastError?: string; fileSize?: number }) {
+  await patch(`/worker/jobs/${jobId}`, {
+    workerId: WORKER_ID,
+    status,
+    bytesTransferred,
+    ...extra,
+  });
 }
 
 async function sendHeartbeat() {
@@ -75,7 +80,7 @@ async function loadExistingKeys(prefix: string): Promise<Set<string>> {
   return keys;
 }
 
-// ─── Single file transfer with retry (from fill-gaps.ts logic) ───
+// ─── Single file transfer with retry ───
 async function transferFile(
   jobId: string,
   file: LarkFileEntry,
@@ -84,30 +89,49 @@ async function transferFile(
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       await updateJob(jobId, 'downloading', 0);
-      const { data, mime } = await downloadLarkFile(file.token, file.type, file.resolvedToken, file.resolvedType);
 
-      await updateJob(jobId, 'uploading', 0);
+      // Stream download → stream upload (no full file in RAM)
+      const { stream, contentLength, mime } = await downloadLarkFileStream(
+        file.token, file.type, file.resolvedToken, file.resolvedType,
+      );
+
+      // Update fileSize with actual content-length from download
+      const actualSize = contentLength || file.size;
+      if (actualSize > 0) {
+        await updateJob(jobId, 'uploading', 0, { fileSize: actualSize });
+      } else {
+        await updateJob(jobId, 'uploading', 0);
+      }
+
+      // Stream directly to MinIO
       let uploaded = 0;
-      await uploadStream(MINIO_BUCKET, objectKey, Buffer.from(data), mime, (loaded) => {
+      await uploadStream(MINIO_BUCKET, objectKey, stream, mime, (loaded) => {
         uploaded = loaded;
         updateJob(jobId, 'uploading', uploaded).catch(() => {});
       });
 
-      await updateJob(jobId, 'completed', data.byteLength);
+      await updateJob(jobId, 'completed', uploaded || actualSize, { fileSize: uploaded || actualSize });
       processedJobs++;
-      console.log(`  [OK] ${file.path} (${(data.byteLength / 1024 / 1024).toFixed(1)}MB)`);
-      return { status: 'OK', size: data.byteLength };
+      console.log(`  [OK] ${file.path} (${(uploaded / 1024 / 1024).toFixed(1)}MB)`);
+      return { status: 'OK', size: uploaded || actualSize };
     } catch (err: any) {
-      const msg = err.message?.slice(0, 100) ?? '';
+      const msg = err.message?.slice(0, 150) ?? '';
+
+      // 403 = permission denied → skip retry immediately
+      if (msg.includes('403') || msg.includes('permission') || msg.includes('forbidden')) {
+        console.log(`  [SKIP] ${file.path}: 403 — no retry`);
+        await updateJob(jobId, 'failed', 0, { lastError: msg });
+        return { status: `FAILED: ${msg}`, size: 0 };
+      }
+
       if (attempt < MAX_RETRIES) {
-        // Rate limit → longer backoff
         const isRL = msg.includes('429') || msg.includes('99991400') || msg.includes('frequency');
         const delay = isRL ? 2000 * Math.pow(1.5, attempt) + Math.random() * 3000 : 1000 * attempt;
         console.log(`  [retry ${attempt}/${MAX_RETRIES}] ${file.name}: ${msg}`);
         await Bun.sleep(delay);
       } else {
         console.log(`  [FAIL] ${file.path}: ${msg}`);
-        await updateJob(jobId, 'failed', 0, msg);
+        await updateJob(jobId, 'failed', 0, { lastError: msg });
         return { status: `FAILED: ${msg}`, size: 0 };
       }
     }
@@ -245,7 +269,6 @@ async function processSession(jobData: {
       if (result.status === 'OK') ok++;
       else fail++;
 
-      // Progress log every 20 files
       if ((ok + fail) % 20 === 0) {
         const pct = ((ok + fail) / missing.length * 100).toFixed(0);
         console.log(`  [progress] ${ok} OK | ${fail} fail | ${pct}%`);

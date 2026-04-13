@@ -43,7 +43,11 @@
       "Bash(kill %1)",
       "Bash(docker compose up:*)",
       "Bash(kill %2)",
-      "Bash(kill %1 %2 %3)"
+      "Bash(kill %1 %2 %3)",
+      "Bash(git rm:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ]
   }
 }

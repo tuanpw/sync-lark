@@ -34,7 +34,6 @@ async function getTenantAccessToken(appId: string, appSecret: string): Promise<s
   });
   const data = (await res.json()) as { code: number; msg: string; tenant_access_token: string; expire: number };
   if (data.code !== 0) throw new Error(`Lark auth failed: ${data.msg}`);
-  // Cache with expiry (expire is in seconds)
   cachedToken = {
     token: data.tenant_access_token,
     expiresAt: Date.now() + (data.expire ?? 7200) * 1000,
@@ -44,24 +43,17 @@ async function getTenantAccessToken(appId: string, appSecret: string): Promise<s
 }
 
 export async function getAccessToken(): Promise<string> {
-  // Return cached token if still valid
   if (cachedToken && Date.now() < cachedToken.expiresAt - TOKEN_REFRESH_MARGIN_MS) {
     return cachedToken.token;
   }
 
-  // Prefer user token from backend (has access to user's own files)
   const backendUrl = process.env.BACKEND_URL ?? 'http://localhost:3001/api';
   try {
     const res = await fetch(`${backendUrl}/auth/lark/access-token`);
     const data = (await res.json()) as { token: string | null };
-    if (data.token) {
-      return data.token;
-    }
-  } catch {
-    // fall through to tenant token
-  }
+    if (data.token) return data.token;
+  } catch { /* fall through */ }
 
-  // Fallback: tenant access token
   const appId = process.env.LARK_APP_ID ?? '';
   const appSecret = process.env.LARK_APP_SECRET ?? '';
   if (!appId || !appSecret) throw new Error('LARK_APP_ID and LARK_APP_SECRET are required');
@@ -77,7 +69,6 @@ export async function listLarkFolderFiles(folderToken: string): Promise<LarkFile
     let pageToken: string | null = null;
 
     do {
-      // Rate-limit protection: pause briefly every 5 API calls
       if (apiCalls > 0 && apiCalls % 5 === 0) {
         await Bun.sleep(200);
       }
@@ -100,11 +91,10 @@ export async function listLarkFolderFiles(folderToken: string): Promise<LarkFile
         };
       };
 
-      // Handle rate-limit (code 99991400 or HTTP 429)
       if (data.code === 99991400 || res.status === 429) {
         console.warn(`[lark-api] rate-limited at call #${apiCalls}, waiting 2s...`);
         await Bun.sleep(2000);
-        continue; // retry same page
+        continue;
       }
 
       if (data.code !== 0) throw new Error(`Lark list files failed (code ${data.code}): ${data.msg}`);
@@ -160,7 +150,7 @@ async function pollExportTask(ticket: string, fileToken: string, accessToken: st
     if (data.code !== 0) throw new Error(`Lark export poll failed: ${data.msg}`);
 
     const { job_status, job_error_msg, file_token } = data.data.result;
-    if (job_status === 0) return file_token; // success
+    if (job_status === 0) return file_token;
     if (job_status >= 100) throw new Error(`Lark export failed: ${job_error_msg}`);
 
     await Bun.sleep(1000);
@@ -168,6 +158,57 @@ async function pollExportTask(ticket: string, fileToken: string, accessToken: st
   throw new Error('Lark export task timed out');
 }
 
+// ─── Download that returns a ReadableStream (no full RAM buffering) ───
+export async function downloadLarkFileStream(
+  fileToken: string,
+  fileType: string,
+  resolvedToken?: string,
+  resolvedType?: string,
+): Promise<{ stream: ReadableStream<Uint8Array>; contentLength: number; mime: string }> {
+  const dlToken = resolvedToken ?? fileToken;
+  const dlType = resolvedType ?? fileType;
+  const accessToken = await getAccessToken();
+  const DOWNLOAD_TIMEOUT = 15 * 60 * 1000; // 15 min timeout for large files
+
+  if (isNativeType(dlType)) {
+    // Native doc: export first, then download as buffer (exports are usually small)
+    const fmt = getExportFormat(dlType)!;
+    const ticket = await createExportTask(dlToken, dlType, fmt.extension, accessToken);
+    const exportedToken = await pollExportTask(ticket, dlToken, accessToken);
+
+    const res = await fetch(`${LARK_API_BASE}/open-apis/drive/v1/medias/${exportedToken}/download`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT),
+    });
+    if (!res.ok) throw new Error(`Lark export download failed: ${res.status}`);
+
+    const contentLength = parseInt(res.headers.get('content-length') ?? '0', 10);
+    return { stream: res.body!, contentLength, mime: fmt.mime };
+  } else {
+    // Regular file: stream directly — don't buffer in RAM
+    const res = await fetch(`${LARK_API_BASE}/open-apis/drive/v1/files/${dlToken}/download`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT),
+    });
+
+    if (!res.ok) {
+      let body = '';
+      try { body = await res.text(); } catch { /* ignore */ }
+      if (body.includes('99991663')) {
+        cachedToken = null;
+      }
+      console.error(`[lark-api] download ${res.status} for token=${dlToken} type=${dlType}:`, body.slice(0, 300));
+      throw new Error(`Lark download failed: ${res.status} — ${body.slice(0, 200)}`);
+    }
+
+    const contentLength = parseInt(res.headers.get('content-length') ?? '0', 10);
+    const mime = res.headers.get('content-type') ?? 'application/octet-stream';
+
+    return { stream: res.body!, contentLength, mime };
+  }
+}
+
+// Keep the old function for backward compat but it's no longer used by worker
 export async function downloadLarkFile(
   fileToken: string,
   fileType: string,
@@ -176,18 +217,17 @@ export async function downloadLarkFile(
 ): Promise<{ data: Uint8Array; fileName: string; mime: string }> {
   const dlToken = resolvedToken ?? fileToken;
   const dlType = resolvedType ?? fileType;
-
-  // Always get fresh token (cached internally, auto-refreshes before expiry)
   const accessToken = await getAccessToken();
+  const DOWNLOAD_TIMEOUT = 15 * 60 * 1000;
 
   if (isNativeType(dlType)) {
-    // Native doc: export first
     const fmt = getExportFormat(dlType)!;
     const ticket = await createExportTask(dlToken, dlType, fmt.extension, accessToken);
     const exportedToken = await pollExportTask(ticket, dlToken, accessToken);
 
     const res = await fetch(`${LARK_API_BASE}/open-apis/drive/v1/medias/${exportedToken}/download`, {
       headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT),
     });
     if (!res.ok) throw new Error(`Lark download failed: ${res.status}`);
 
@@ -197,19 +237,17 @@ export async function downloadLarkFile(
 
     return { data: new Uint8Array(await res.arrayBuffer()), fileName, mime: fmt.mime };
   } else {
-    // Regular uploaded file in Drive — use /files/ endpoint (not /medias/)
     const res = await fetch(`${LARK_API_BASE}/open-apis/drive/v1/files/${dlToken}/download`, {
       headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT),
     });
 
     if (!res.ok) {
       let body = '';
       try { body = await res.text(); } catch { /* ignore */ }
-      // If token expired (99991663), force refresh and throw to trigger retry
       if (body.includes('99991663')) {
-        cachedToken = null; // force refresh on next call
+        cachedToken = null;
       }
-      console.error(`[lark-api] download ${res.status} for token=${dlToken} type=${dlType}:`, body.slice(0, 300));
       throw new Error(`Lark download failed: ${res.status} — ${body.slice(0, 200)}`);
     }
 

@@ -244,7 +244,7 @@ class PersistentStore {
     return job;
   }
 
-  updateJobProgress(jobId: string, workerId: string, status: TransferJobStatus, bytesTransferred: number, lastError?: string) {
+  updateJobProgress(jobId: string, workerId: string, status: TransferJobStatus, bytesTransferred: number, lastError?: string, fileSize?: number) {
     const job = this.data.transferJobs.find(j => j.id === jobId);
     if (!job) return { ok: false };
 
@@ -253,6 +253,7 @@ class PersistentStore {
     job.workerId = workerId;
     job.bytesTransferred = bytesTransferred;
     if (lastError !== undefined) job.lastError = lastError;
+    if (fileSize !== undefined && fileSize > 0) job.fileSize = fileSize;
     job.updatedAt = new Date().toISOString();
 
     const session = this.data.importSessions.find(s => s.id === job.importSessionId);
@@ -268,9 +269,9 @@ class PersistentStore {
         session.runningFiles = Math.max(0, session.runningFiles - 1);
       }
 
-      session.transferredBytes = this.data.transferJobs
-        .filter(j => j.importSessionId === session.id)
-        .reduce((sum, j) => sum + j.bytesTransferred, 0);
+      const sessionJobs = this.data.transferJobs.filter(j => j.importSessionId === session.id);
+      session.transferredBytes = sessionJobs.reduce((sum, j) => sum + j.bytesTransferred, 0);
+      session.totalBytes = sessionJobs.reduce((sum, j) => sum + j.fileSize, 0);
 
       const done = session.completedFiles + session.failedFiles;
       if (done >= session.totalFiles && session.totalFiles > 0 && session.status === 'running') {
@@ -280,8 +281,24 @@ class PersistentStore {
       session.updatedAt = new Date().toISOString();
     }
 
-    this.saveToDisk();
+    // Only save to disk on status transitions (not on every progress update)
+    const isTransition = prevStatus !== status;
+    if (isTransition) {
+      this.saveToDisk();
+    } else {
+      this.debouncedSave();
+    }
     return { ok: true };
+  }
+
+  // Debounced save: max once every 2s for progress updates
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private debouncedSave() {
+    if (this.saveTimer) return;
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null;
+      this.saveToDisk();
+    }, 2000);
   }
 
   // ─── Worker registry (in-memory) ───
