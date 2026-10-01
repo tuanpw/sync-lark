@@ -1,4 +1,4 @@
-# Lark → MinIO Sync Platform check commit test
+# Lark → MinIO Sync Platform, chinh sua commit check bot review pr
 
 Platform dong bo file tu Lark Drive sang MinIO. Chi can dan link folder Lark, he thong tu dong crawl, so sanh voi MinIO, va chi download nhung file con thieu.
 
